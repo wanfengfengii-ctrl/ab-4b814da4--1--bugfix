@@ -13,7 +13,6 @@ reclaimed by the next worker pass.
 """
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import threading
@@ -91,7 +90,8 @@ class Database:
         is "created", "replayed", or raises ConflictError for same-key/
         different-body. Creates the delivery row atomically in the same tx.
         """
-        from .models import ConflictError  # local import: models has no db deps
+        from .models import (ConflictError, canonical_dumps, display_dumps,
+                             json_equal, parse_json)  # models has no db deps
 
         now = time.time()
         with self._write_lock:
@@ -102,14 +102,18 @@ class Database:
                     "SELECT alert_id, body_json FROM alerts WHERE alert_key = ?",
                     (alert_key,),
                 ).fetchone()
-                body_json = json.dumps(body, sort_keys=True, separators=(",", ":"))
+                body_json = canonical_dumps(body)
                 if row is not None:
-                    if row["body_json"] != body_json:
-                        stored = json.loads(row["body_json"])
+                    # Compare by exact numeric meaning rather than by bytes:
+                    # an equal value spelled differently (1 vs 1.0) is the
+                    # same content, while distinct readings float would merge
+                    # (e.g. 9007199254740992 vs ...4993) must conflict.
+                    if not json_equal(parse_json(row["body_json"]), body):
+                        stored = parse_json(row["body_json"])
                         raise ConflictError(
                             f"alertKey {alert_key!r} already accepted with different content: "
-                            f"stored={json.dumps(stored, ensure_ascii=False)} "
-                            f"submitted={json.dumps(body, ensure_ascii=False)}")
+                            f"stored={display_dumps(stored)} "
+                            f"submitted={display_dumps(body)}")
                     delivery = conn.execute(
                         "SELECT delivery_id, payload FROM deliveries WHERE alert_id = ?",
                         (row["alert_id"],),
@@ -120,9 +124,8 @@ class Database:
 
                 alert_id = uuid.uuid4().hex
                 delivery_id = uuid.uuid4().hex
-                payload = json.dumps(
+                payload = canonical_dumps(
                     {"deliveryId": delivery_id, "alertId": alert_id, "alert": body},
-                    sort_keys=True, separators=(",", ":"),
                 ).encode("utf-8")
                 conn.execute(
                     "INSERT INTO alerts (alert_key, alert_id, body_json, created_at)"

@@ -11,9 +11,13 @@ import time
 import uuid
 from typing import Protocol
 
+from app.models import canonical_dumps, parse_json
+from app.signing import body_digest
+
 
 class StackProtocol(Protocol):
     def post_alert(self, payload: dict): ...
+    def post_alert_text(self, raw: str | bytes): ...
     def get_alert(self, alert_id: str): ...
     def wait_terminal(self, alert_id: str, timeout: float = 60.0) -> dict: ...
     def set_fault(self, spec: dict | None): ...
@@ -35,6 +39,76 @@ def _alert(run: str, n: int, **overrides) -> dict:
 
 
 # Each scenario returns a human-readable result line and raises on failure.
+
+def _raw_alert(alert_key: str, reading_token: str) -> str:
+    # Hand-written JSON so tokens a Python float cannot spell (e.g.
+    # 9007199254740993, 0.10000000000000001) reach the API byte-for-byte.
+    return (
+        '{"alertKey":"%s","station":"STA-PREC","sequence":1,'
+        '"severity":"major","observedAt":"2026-10-05T00:00:00Z",'
+        '"reading":%s}' % (alert_key, reading_token)
+    )
+
+
+def _signed_payload_digest(alert_id: str, delivery_id: str, raw_alert: str) -> str:
+    """SHA-256 of the exact canonical body the API must have sent the gateway."""
+    payload = {
+        "deliveryId": delivery_id,
+        "alertId": alert_id,
+        "alert": parse_json(raw_alert),
+    }
+    return body_digest(canonical_dumps(payload).encode("utf-8"))
+
+
+def scenario_exact_number_precision(stack: StackProtocol, run: str) -> str:
+    key = f"{run}-PREC"
+    raw_first = _raw_alert(key, "9007199254740992")
+    code, body = stack.post_alert_text(raw_first)
+    assert code == 201, f"expected 201, got {code}: {body}"
+    alert_id, delivery_id = body["alertId"], body["deliveryId"]
+
+    final = stack.wait_terminal(alert_id)
+    assert final["status"] == "delivered", final
+
+    # The body the gateway signed for must carry the exact submitted reading,
+    # not a float-rounded neighbour. Compare canonical bytes via digest, which
+    # also proves no silent value change in the signed request body.
+    expected_digest = _signed_payload_digest(alert_id, delivery_id, raw_first)
+    requests = stack.requests_for(delivery_id)
+    assert requests, "gateway never received the delivery"
+    assert all(r["body_sha256"] == expected_digest for r in requests), \
+        "gateway received a body whose bytes differ from the submitted reading"
+    assert stack.acceptance_count(delivery_id) == 1
+
+    # Neighbouring huge integer that float conflates with the first value:
+    # same business key, different content -> 409, no replay of first ids.
+    code2, body2 = stack.post_alert_text(_raw_alert(key, "9007199254740993"))
+    assert code2 == 409, f"adjacent huge integers must conflict, got {code2}: {body2}"
+    assert body2.get("alertId") not in (alert_id,), body2
+    assert body2.get("deliveryId") is None, body2
+
+    # Exact same content replays the original identifiers, accepted still once.
+    code3, body3 = stack.post_alert_text(raw_first)
+    assert code3 == 200, body3
+    assert body3["replayed"] is True
+    assert (body3["alertId"], body3["deliveryId"]) == (alert_id, delivery_id)
+    assert stack.acceptance_count(delivery_id) == 1
+
+    # Distinct decimals a float would likewise merge.
+    key_dec = f"{run}-DEC"
+    raw_dec = _raw_alert(key_dec, "0.1")
+    code, body = stack.post_alert_text(raw_dec)
+    assert code == 201, body
+    dec_id, dec_delivery = body["alertId"], body["deliveryId"]
+    stack.wait_terminal(dec_id)
+    code, body = stack.post_alert_text(_raw_alert(key_dec, "0.10000000000000001"))
+    assert code == 409, f"distinct decimals must conflict, got {code}: {body}"
+    code, body = stack.post_alert_text(raw_dec)
+    assert code == 200 and body["replayed"] is True, body
+    assert (body["alertId"], body["deliveryId"]) == (dec_id, dec_delivery)
+    return ("exact numbers: adjacent huge integers and distinct decimals"
+            " conflict (409), same content replays, gateway body keeps the value")
+
 
 def scenario_happy_path(stack: StackProtocol, run: str) -> str:
     code, body = stack.post_alert(_alert(run, 1))
@@ -165,6 +239,7 @@ def scenario_retries_exhausted(stack: StackProtocol, run: str) -> str:
 SCENARIOS = [
     scenario_happy_path,
     scenario_conflict,
+    scenario_exact_number_precision,
     scenario_retry_identity_after_5xx,
     scenario_drop_after_accept,
     scenario_timeout_then_success,

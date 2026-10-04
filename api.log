@@ -1,0 +1,9 @@
+2026-10-04 17:38:52,070 INFO delivery delivery worker started, target=http://127.0.0.1:9191/ingest
+2026-10-04 17:38:52,070 INFO main alert API listening on 127.0.0.1:8181 (db=/tmp/prec-check/api.db, receiver=http://127.0.0.1:9191/ingest)
+2026-10-04 17:38:54,031 INFO api 127.0.0.1 - "POST /api/alerts HTTP/1.1" 201 -
+2026-10-04 17:38:54,037 INFO api 127.0.0.1 - "POST /api/alerts HTTP/1.1" 409 -
+2026-10-04 17:38:54,044 INFO delivery alert e929c88b879149a0990070f7d6dd745f attempt 1 failed (network_error), retry in 0.5s
+2026-10-04 17:38:54,549 INFO delivery alert e929c88b879149a0990070f7d6dd745f attempt 2 failed (network_error), retry in 1.0s
+2026-10-04 17:38:55,553 INFO delivery alert e929c88b879149a0990070f7d6dd745f attempt 3 failed (network_error), retry in 1.5s
+2026-10-04 17:38:57,059 WARNING delivery alert e929c88b879149a0990070f7d6dd745f failed after 4 attempt(s): retry budget exhausted
+2026-10-04 17:44:17,380 INFO main signal 15 received, shutting down

@@ -41,8 +41,12 @@ def _http(method: str, url: str, body=None, headers=None, timeout: float = 10.0)
     headers = dict(headers or {})
     data = None
     if body is not None:
-        data = json.dumps(body).encode("utf-8")
-        headers.setdefault("Content-Type", "application/json")
+        if isinstance(body, (bytes, bytearray)):
+            data = bytes(body)
+            headers.setdefault("Content-Type", "application/json")
+        else:
+            data = json.dumps(body).encode("utf-8")
+            headers.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -72,6 +76,12 @@ class ExternalStack:
 
     def post_alert(self, payload):
         return _http("POST", f"{API_URL}/api/alerts", payload)
+
+    def post_alert_text(self, raw):
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        return _http("POST", f"{API_URL}/api/alerts", raw,
+                     headers={"Content-Type": "application/json"})
 
     def get_alert(self, alert_id):
         return _http("GET", f"{API_URL}/api/alerts/{alert_id}")
