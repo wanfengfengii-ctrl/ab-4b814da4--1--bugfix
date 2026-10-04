@@ -1,0 +1,70 @@
+services:
+  receiver:
+    build: .
+    image: seismic-alert-system
+    command: ["python", "-m", "receiver.simulator"]
+    environment:
+      RECEIVER_HOST: "0.0.0.0"
+      RECEIVER_PORT: "9090"
+      RECEIVER_DB: "/data/receiver.db"
+      SHARED_SECRET: "${SHARED_SECRET:-compose-shared-secret}"
+      SIM_FAULT_TOKEN: "${SIM_FAULT_TOKEN:-compose-sim-token}"
+    volumes:
+      - receiver-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9090/healthz', timeout=2).status == 200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
+    restart: unless-stopped
+
+  api:
+    build: .
+    image: seismic-alert-system
+    command: ["python", "-m", "app.main"]
+    environment:
+      API_HOST: "0.0.0.0"
+      API_PORT: "8080"
+      API_DB: "/data/api.db"
+      RECEIVER_URL: "http://receiver:9090/ingest"
+      SHARED_SECRET: "${SHARED_SECRET:-compose-shared-secret}"
+      DELIVERY_TIMEOUT: "2"
+      DELIVERY_MAX_RETRIES: "3"
+      DELIVERY_BACKOFF_BASE: "0.3"
+      DELIVERY_STALE_AFTER: "5"
+    ports:
+      # Host-side port for the API is configurable: API_HOST_PORT=9090 docker compose up
+      - "${API_HOST_PORT:-8080}:8080"
+    volumes:
+      - api-data:/data
+    depends_on:
+      receiver:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).status == 200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
+    restart: unless-stopped
+
+  verify:
+    image: seismic-alert-system
+    build: .
+    command: ["python", "scripts/verify.py"]
+    environment:
+      API_URL: "http://api:8080"
+      RECEIVER_URL: "http://receiver:9090"
+      SHARED_SECRET: "${SHARED_SECRET:-compose-shared-secret}"
+      SIM_FAULT_TOKEN: "${SIM_FAULT_TOKEN:-compose-sim-token}"
+    depends_on:
+      api:
+        condition: service_healthy
+      receiver:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  api-data:
+  receiver-data:
