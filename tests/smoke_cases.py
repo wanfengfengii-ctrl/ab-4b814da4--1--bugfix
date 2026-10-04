@@ -7,13 +7,16 @@ StackProtocol, so the exact same assertions run:
 """
 from __future__ import annotations
 
+import json
 import time
 import uuid
+from decimal import Decimal
 from typing import Protocol
 
 
 class StackProtocol(Protocol):
     def post_alert(self, payload: dict): ...
+    def post_alert_raw(self, raw: bytes): ...
     def get_alert(self, alert_id: str): ...
     def wait_terminal(self, alert_id: str, timeout: float = 60.0) -> dict: ...
     def set_fault(self, spec: dict | None): ...
@@ -32,6 +35,32 @@ def _alert(run: str, n: int, **overrides) -> dict:
     }
     payload.update(overrides)
     return payload
+
+
+def _raw_alert(alert_key: str, reading_literal: str, *, station: str = "STA-PREC",
+               sequence: int = 1) -> bytes:
+    # Built as text on purpose: values such as 9007199254740993 or
+    # 0.10000000000000001 cannot survive a Python float round-trip, so a
+    # dict-based client could not even express them on the wire.
+    return (
+        "{"
+        f'"alertKey":{json.dumps(alert_key)},'
+        f'"station":{json.dumps(station)},'
+        f'"sequence":{sequence},'
+        '"severity":"major",'
+        '"observedAt":"2026-10-05T00:00:00Z",'
+        f'"reading":{reading_literal}'
+        "}"
+    ).encode("utf-8")
+
+
+def _delivered_body_text(stack: StackProtocol, delivery_id: str) -> str:
+    requests = stack.requests_for(delivery_id)
+    acked = [r for r in requests if r["http_status"] in (200, 201)]
+    assert acked, f"gateway never acknowledged delivery {delivery_id}: {requests}"
+    bodies = {r.get("body_text") for r in acked}
+    assert len(bodies) == 1, f"gateway saw differing bodies: {bodies}"
+    return next(iter(bodies))
 
 
 # Each scenario returns a human-readable result line and raises on failure.
@@ -162,9 +191,71 @@ def scenario_retries_exhausted(stack: StackProtocol, run: str) -> str:
     return "5xx x10: failed terminally after 4 attempts (1 + 3 retries)"
 
 
+def scenario_exact_number_precision(stack: StackProtocol, run: str) -> str:
+    # Adjacent integers beyond the IEEE-754 safe range collapse to one double;
+    # the API must keep them distinct all the way to the signed gateway body.
+    big_key = f"{run}-PREC-BIG"
+    raw_big_1 = _raw_alert(big_key, "9007199254740992")
+    raw_big_2 = _raw_alert(big_key, "9007199254740993")
+    code, body = stack.post_alert_raw(raw_big_1)
+    assert code == 201, f"expected 201, got {code}: {body}"
+    alert_id, delivery_id = body["alertId"], body["deliveryId"]
+    final = stack.wait_terminal(alert_id)
+    assert final["status"] == "delivered", final
+    gateway_body = _delivered_body_text(stack, delivery_id)
+    assert '"reading":9007199254740992' in gateway_body, (
+        f"gateway body lost the exact reading: {gateway_body}")
+    delivered_json = json.loads(gateway_body, parse_float=Decimal)
+    assert delivered_json["alert"]["reading"] == Decimal("9007199254740992"), gateway_body
+    assert stack.acceptance_count(delivery_id) == 1
+
+    # Same key + an adjacent reading is a conflict, never an id replay.
+    code2, body2 = stack.post_alert_raw(raw_big_2)
+    assert code2 == 409, f"adjacent big integer must conflict, got {code2}: {body2}"
+    assert "alertId" not in body2 and "deliveryId" not in body2, body2
+
+    # Same key + byte-identical content still replays the original identifiers.
+    code3, body3 = stack.post_alert_raw(raw_big_1)
+    assert code3 == 200, body3
+    assert body3["replayed"] is True
+    assert body3["alertId"] == alert_id and body3["deliveryId"] == delivery_id
+    assert stack.acceptance_count(delivery_id) == 1, "replay caused a second acceptance"
+
+    # Distinguishable decimals that share one binary64 value must conflict too.
+    dec_key = f"{run}-PREC-DEC"
+    raw_dec_1 = _raw_alert(dec_key, "0.1")
+    raw_dec_2 = _raw_alert(dec_key, "0.10000000000000001")
+    code, body = stack.post_alert_raw(raw_dec_1)
+    assert code == 201, body
+    final = stack.wait_terminal(body["alertId"])
+    assert final["status"] == "delivered", final
+    gateway_body = _delivered_body_text(stack, body["deliveryId"])
+    assert '"reading":0.1' in gateway_body and "0.10000000000000001" not in gateway_body, (
+        gateway_body)
+    code2, body2 = stack.post_alert_raw(raw_dec_2)
+    assert code2 == 409, f"distinct decimals must conflict, got {code2}: {body2}"
+    code3, body3 = stack.post_alert_raw(raw_dec_1)
+    assert code3 == 200 and body3["replayed"] is True, body3
+
+    # Ordinary readings through a normal JSON client keep working.
+    ordinary = _alert(run, 8, reading=42.5)
+    code, body = stack.post_alert(ordinary)
+    assert code == 201, body
+    assert stack.wait_terminal(body["alertId"])["status"] == "delivered"
+    code2, body2 = stack.post_alert(ordinary)
+    assert code2 == 200 and body2["replayed"] is True, body2
+    assert body2["alertId"] == body["alertId"]
+    code3, body3 = stack.post_alert(_alert(run, 8, reading=43))
+    assert code3 == 409, f"ordinary reading change must conflict, got {code3}: {body3}"
+    return ("exact JSON numbers: adjacent 2^53+ integers and 0.1 vs"
+            " 0.10000000000000001 stay distinct in acceptance and in the signed"
+            " gateway body; same-content replays stay compatible")
+
+
 SCENARIOS = [
     scenario_happy_path,
     scenario_conflict,
+    scenario_exact_number_precision,
     scenario_retry_identity_after_5xx,
     scenario_drop_after_accept,
     scenario_timeout_then_success,

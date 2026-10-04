@@ -37,12 +37,17 @@ RECEIVER_URL = os.getenv("RECEIVER_URL", "http://127.0.0.1:9090").rstrip("/")
 SIM_TOKEN = os.getenv("SIM_FAULT_TOKEN", "compose-sim-token")
 
 
-def _http(method: str, url: str, body=None, headers=None, timeout: float = 10.0):
+def _http(method: str, url: str, body=None, headers=None, timeout: float = 10.0,
+          raw_body=None):
     headers = dict(headers or {})
-    data = None
-    if body is not None:
+    if raw_body is not None:
+        data = raw_body
+        headers.setdefault("Content-Type", "application/json")
+    elif body is not None:
         data = json.dumps(body).encode("utf-8")
         headers.setdefault("Content-Type", "application/json")
+    else:
+        data = None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -71,7 +76,18 @@ class ExternalStack:
     """StackProtocol adapter driving the containers over real HTTP."""
 
     def post_alert(self, payload):
-        return _http("POST", f"{API_URL}/api/alerts", payload)
+        return _http(
+            "POST", f"{API_URL}/api/alerts", None,
+            headers={"Content-Type": "application/json"},
+            raw_body=json.dumps(payload).encode("utf-8"),
+        )
+
+    def post_alert_raw(self, raw):
+        return _http(
+            "POST", f"{API_URL}/api/alerts", None,
+            headers={"Content-Type": "application/json"},
+            raw_body=raw,
+        )
 
     def get_alert(self, alert_id):
         return _http("GET", f"{API_URL}/api/alerts/{alert_id}")

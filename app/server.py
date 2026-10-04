@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 
 from .config import Settings
 from .database import Database
-from .models import ConflictError, ValidationError, parse_alert
+from .models import ConflictError, ValidationError, parse_alert_json
 
 log = logging.getLogger("api")
 
@@ -106,9 +106,11 @@ class AlertHandler(BaseHTTPRequestHandler):
             return
         raw = self.rfile.read(length)
         try:
-            data = json.loads(raw.decode("utf-8"))
-            alert = parse_alert(data)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            alert = parse_alert_json(raw)
+        except UnicodeDecodeError as exc:
+            self._error(400, f"invalid JSON: {exc}")
+            return
+        except json.JSONDecodeError as exc:
             self._error(400, f"invalid JSON: {exc}")
             return
         except ValidationError as exc:

@@ -23,6 +23,7 @@ POST /api/alerts ──► 告警 API (app/)                   [容器 api]
 | 风险 | 机制 |
 |---|---|
 | 调用方重复提交（网络闪断后重发） | `alertKey` 为幂等键：同键同内容回放**原** `alertId`/`deliveryId`（HTTP 200，`replayed:true`）；同键异内容返回 **409 冲突** |
+| 大整数 / 高精度读数被四舍五入 | JSON 数值按**精确数值**解析（`Decimal`，整数任意精度）：`9007199254740992` 与 `9007199254740993`、`0.1` 与 `0.10000000000000001` 在受理判定、幂等比较与发往网关的签名请求体中始终可区分 |
 | 重试之间请求被改 | 投递请求体在首次受理时就固化为规范字节串；签名 `HMAC-SHA256(secret, "seismic-alert-v1" + deliveryId + SHA256(body))` 覆盖 deliveryId 与请求体，每次尝试完全相同 |
 | 超时 / 断连 / 5xx | 网络错误、超时、连接中断和 HTTP 5xx 重试，**首次 + 最多 3 次重试 = 4 次尝试**，指数退避 |
 | 4xx | **立即失败**，不消耗重试预算 |
@@ -44,7 +45,7 @@ docker compose up --build
 - API 宿主机端口由 `API_HOST_PORT` 控制（默认 `8080`）。
 - `api` 与 `receiver` 配置了 Docker 健康检查；`api` 等 `receiver` 健康后才启动。
 - **`verify` 是一次性服务**：顺序执行 ① 构建检查（compileall）② 全部代码测试
-  （23 项，含重启恢复）③ 对正在运行的容器做真实 HTTP 投递冒烟（7 个场景），
+  （34 项，含重启恢复）③ 对正在运行的容器做真实 HTTP 投递冒烟（8 个场景），
   **退出码汇总结果：全部通过为 0，否则为 1**。
 
 只跑校验任务：
@@ -109,7 +110,7 @@ curl ... -d '{"mode":null}'
 ## 本地开发（无需 Docker）
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py'   # 全部 23 项测试
+python3 -m unittest discover -s tests -p 'test_*.py'   # 全部 34 项测试
 
 # 手动起两个进程
 RECEIVER_PORT=9090 python3 -m receiver.simulator

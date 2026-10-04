@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     ts REAL NOT NULL,
     delivery_id TEXT NOT NULL,
     body_sha256 TEXT NOT NULL,
+    body_text TEXT,
     signature TEXT,
     http_status INTEGER NOT NULL
 ) STRICT;
@@ -70,6 +71,11 @@ def open_db(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=FULL")
     conn.executescript(_create)
+    # Migration for databases created before request bodies were retained.
+    try:
+        conn.execute("ALTER TABLE request_log ADD COLUMN body_text TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already present
     conn.commit()
     return conn
 
@@ -133,11 +139,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _log_request(self, delivery_id: str, body: bytes, signature: str, status: int) -> None:
+        body_digest_hex = body_digest(body) if body else ""
+        body_text = body.decode("utf-8", "replace") if body else None
         with _db_lock:
             self.db.execute(
-                "INSERT INTO request_log (ts, delivery_id, body_sha256, signature, http_status)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (time.time(), delivery_id, body_digest(body) if body else "", signature, status),
+                "INSERT INTO request_log"
+                " (ts, delivery_id, body_sha256, body_text, signature, http_status)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (time.time(), delivery_id, body_digest_hex, body_text, signature, status),
             )
             self.db.commit()
 
@@ -159,13 +168,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
             delivery_id = (query.get("deliveryId") or [""])[0]
             if delivery_id:
                 rows = self.db.execute(
-                    "SELECT ts, delivery_id, body_sha256, signature, http_status"
+                    "SELECT ts, delivery_id, body_sha256, body_text, signature, http_status"
                     " FROM request_log WHERE delivery_id = ? ORDER BY id",
                     (delivery_id,),
                 ).fetchall()
             else:
                 rows = self.db.execute(
-                    "SELECT ts, delivery_id, body_sha256, signature, http_status"
+                    "SELECT ts, delivery_id, body_sha256, body_text, signature, http_status"
                     " FROM request_log ORDER BY id"
                 ).fetchall()
             self._json(200, {"requests": [dict(r) for r in rows]})

@@ -91,7 +91,13 @@ class Database:
         is "created", "replayed", or raises ConflictError for same-key/
         different-body. Creates the delivery row atomically in the same tx.
         """
-        from .models import ConflictError  # local import: models has no db deps
+        from .models import (  # local import: models has no db deps
+            ConflictError, canonical_json, content_equal,
+        )
+
+        def _decode_exact(text: str):
+            from decimal import Decimal
+            return json.loads(text, parse_float=Decimal)
 
         now = time.time()
         with self._write_lock:
@@ -102,14 +108,26 @@ class Database:
                     "SELECT alert_id, body_json FROM alerts WHERE alert_key = ?",
                     (alert_key,),
                 ).fetchone()
-                body_json = json.dumps(body, sort_keys=True, separators=(",", ":"))
+                body_json = canonical_json(body)
                 if row is not None:
-                    if row["body_json"] != body_json:
-                        stored = json.loads(row["body_json"])
+                    stored_body_json = row["body_json"]
+                    # Exact canonical text is authoritative for rows written by
+                    # this version; the numeric fallback keeps same-content
+                    # replays of legacy rows compatible (whose numbers were
+                    # serialised as doubles, e.g. integral reading 5 as "5.0").
+                    # The stored body is re-decoded with full precision so the
+                    # fallback can never collapse two distinct exact values
+                    # (e.g. 0.1 vs 0.10000000000000001) into one double.
+                    same_content = (
+                        stored_body_json == body_json
+                        or content_equal(_decode_exact(stored_body_json), body)
+                    )
+                    if not same_content:
+                        stored = _decode_exact(stored_body_json)
                         raise ConflictError(
                             f"alertKey {alert_key!r} already accepted with different content: "
-                            f"stored={json.dumps(stored, ensure_ascii=False)} "
-                            f"submitted={json.dumps(body, ensure_ascii=False)}")
+                            f"stored={canonical_json(stored)} "
+                            f"submitted={body_json}")
                     delivery = conn.execute(
                         "SELECT delivery_id, payload FROM deliveries WHERE alert_id = ?",
                         (row["alert_id"],),
@@ -120,9 +138,8 @@ class Database:
 
                 alert_id = uuid.uuid4().hex
                 delivery_id = uuid.uuid4().hex
-                payload = json.dumps(
-                    {"deliveryId": delivery_id, "alertId": alert_id, "alert": body},
-                    sort_keys=True, separators=(",", ":"),
+                payload = canonical_json(
+                    {"deliveryId": delivery_id, "alertId": alert_id, "alert": body}
                 ).encode("utf-8")
                 conn.execute(
                     "INSERT INTO alerts (alert_key, alert_id, body_json, created_at)"

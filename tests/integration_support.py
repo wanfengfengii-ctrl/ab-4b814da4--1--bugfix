@@ -113,6 +113,11 @@ class Stack:
     def post_alert(self, payload: dict):
         return http_request("POST", f"{self.api_url}/api/alerts", payload)
 
+    def post_alert_raw(self, raw: bytes):
+        return http_request(
+            "POST", f"{self.api_url}/api/alerts", raw,
+            headers={"Content-Type": "application/json"})
+
     def get_alert(self, alert_id: str):
         return http_request("GET", f"{self.api_url}/api/alerts/{alert_id}")
 
